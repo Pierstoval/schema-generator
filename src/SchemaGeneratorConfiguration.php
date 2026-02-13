@@ -70,6 +70,7 @@ final class SchemaGeneratorConfiguration implements ConfigurationInterface
                     ->addDefaultsIfNotSet()
                     ->children()
                         ->scalarNode('file')->defaultNull()->end()
+                        ->booleanNode('generateAttributes')->defaultFalse()->info('Automatically add default CRUD operations (Get, Put, Patch, Delete, GetCollection, Post) to generated types, based on existing paths')->end()
                     ->end()
                 ->end()
                 ->arrayNode('vocabularies')

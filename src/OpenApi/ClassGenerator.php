@@ -28,7 +28,9 @@ use ApiPlatform\SchemaGenerator\OpenApi\PropertyGenerator\PropertyGenerator;
 use ApiPlatform\SchemaGenerator\PhpTypeConverterInterface;
 use ApiPlatform\SchemaGenerator\PropertyGenerator\PropertyGeneratorInterface;
 use cebe\openapi\spec\OpenApi;
+use cebe\openapi\spec\Operation;
 use cebe\openapi\spec\RequestBody;
+use cebe\openapi\spec\Responses;
 use cebe\openapi\spec\Schema;
 use Doctrine\Common\Collections\ArrayCollection;
 use Doctrine\Common\Collections\Collection;
@@ -136,6 +138,9 @@ final class ClassGenerator
 
             $classes[$name] = $class;
         }
+
+        // Enrich operations from all paths when autoOperations is enabled
+        $classes = $this->enrichOperationsFromPaths($openApi, $classes, $config);
 
         // Second pass
         $useInterface = $config['useInterface'];
@@ -289,5 +294,265 @@ final class ClassGenerator
         }
 
         return $classA;
+    }
+
+    /**
+     * @param OpenApiClass[] $classes
+     * @param Configuration  $config
+     *
+     * @return OpenApiClass[]
+     */
+    private function enrichOperationsFromPaths(OpenApi $openApi, array $classes, array $config): array
+    {
+        if (empty($config['openApi']['generateAttributes']) || $config['apiPlatformOldAttributes']) {
+            return $classes;
+        }
+
+        /** @var array<string, array<string, array<string, mixed>>> $classOperations */
+        $classOperations = [];
+
+        foreach ($openApi->paths as $path => $pathItem) {
+            foreach (['get', 'put', 'post', 'delete', 'patch'] as $method) {
+                $cebeOp = $pathItem->$method;
+                if (null === $cebeOp) {
+                    continue;
+                }
+
+                // Match operation to a class via its first tag
+                $className = $this->resolveClassNameFromTags($cebeOp, $classes);
+                if (null === $className) {
+                    continue;
+                }
+
+                $opClass = $this->mapHttpMethodToOperationClass($method, $path);
+                $opName = $cebeOp->operationId ?? \sprintf('%s%s', $method, str_replace(['/', '{', '}', '-'], ['_', '', '', '_'], $path));
+                $metadata = [
+                    'class' => $opClass,
+                    'name' => $opName,
+                    'uriTemplate' => $path,
+                    'openapi' => $this->extractOpenApiMetadata($cebeOp),
+                ];
+                $classOperations[$className][$opName] = $metadata;
+            }
+        }
+
+        foreach ($classOperations as $className => $ops) {
+            $classes[$className]->operations = $ops;
+        }
+
+        return $classes;
+    }
+
+    /**
+     * @param OpenApiClass[] $classes
+     */
+    private function resolveClassNameFromTags(Operation $operation, array $classes): ?string
+    {
+        if (!$operation->tags) {
+            return null;
+        }
+
+        foreach ($operation->tags as $tag) {
+            if (isset($classes[$tag])) {
+                return $tag;
+            }
+        }
+
+        return null;
+    }
+
+    private function mapHttpMethodToOperationClass(string $method, string $path): string
+    {
+        $hasParam = (bool) preg_match('/\{[^}]+\}/', $path);
+
+        return match ($method) {
+            'get' => $hasParam ? 'Get' : 'GetCollection',
+            'post' => 'Post',
+            'put' => 'Put',
+            'patch' => 'Patch',
+            'delete' => 'Delete',
+            default => 'Get',
+        };
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function extractOpenApiMetadata(Operation $operation): array
+    {
+        $metadata = [];
+
+        if ($operation->tags) {
+            $metadata['tags'] = $operation->tags;
+        }
+        if ($operation->summary) {
+            $metadata['summary'] = $operation->summary;
+        }
+        if ($operation->description) {
+            $metadata['description'] = $operation->description;
+        }
+        if ($operation->responses) {
+            $metadata['responses'] = $this->extractResponses($operation->responses);
+        }
+        if ($operation->parameters) {
+            $metadata['parameters'] = $this->extractCebeParameters($operation->parameters);
+        }
+        if ($operation->requestBody instanceof RequestBody) {
+            $metadata['requestBody'] = $this->extractRequestBody($operation->requestBody);
+        }
+
+        return $metadata;
+    }
+
+    /**
+     * @return array<int|string, array<string, mixed>>
+     */
+    private function extractResponses(Responses $responses): array
+    {
+        $result = [];
+
+        foreach ($responses->getResponses() as $statusCode => $response) {
+            $entry = [];
+            if (isset($response->description)) {
+                $entry['description'] = $response->description;
+            }
+            if (isset($response->headers) && $response->headers) {
+                $headers = [];
+                foreach ($response->headers as $headerName => $header) {
+                    $headerData = [];
+                    if (isset($header->required)) {
+                        $headerData['required'] = $header->required;
+                    }
+                    if (isset($header->description)) {
+                        $headerData['description'] = $header->description;
+                    }
+                    if (isset($header->schema) && $header->schema instanceof Schema) {
+                        $headerData['schema'] = $this->schemaToArray($header->schema);
+                    }
+                    $headers[$headerName] = $headerData;
+                }
+                $entry['headers'] = $headers;
+            }
+            $result[(int) $statusCode] = $entry;
+        }
+
+        return $result;
+    }
+
+    /**
+     * @param array<int, mixed> $parameters
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function extractCebeParameters(array $parameters): array
+    {
+        $result = [];
+
+        foreach ($parameters as $parameter) {
+            $entry = [];
+            if (isset($parameter->name)) {
+                $entry['name'] = $parameter->name;
+            }
+            if (isset($parameter->in)) {
+                $entry['in'] = $parameter->in;
+            }
+            if (isset($parameter->description)) {
+                $entry['description'] = $parameter->description;
+            }
+            if (isset($parameter->required)) {
+                $entry['required'] = $parameter->required;
+            }
+            if (isset($parameter->schema) && $parameter->schema instanceof Schema) {
+                $entry['schema'] = $this->schemaToArray($parameter->schema);
+            }
+            $result[] = $entry;
+        }
+
+        return $result;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function extractRequestBody(RequestBody $requestBody): array
+    {
+        $result = [];
+
+        if ($requestBody->required) {
+            $result['required'] = $requestBody->required;
+        }
+        if ($requestBody->description) {
+            $result['description'] = $requestBody->description;
+        }
+        if ($requestBody->content) {
+            $content = [];
+            foreach ($requestBody->content as $contentType => $mediaType) {
+                $mediaData = [];
+                if (isset($mediaType->schema) && $mediaType->schema instanceof Schema) {
+                    $mediaData['schema'] = $this->schemaToArray($mediaType->schema);
+                }
+                $content[$contentType] = $mediaData;
+            }
+            $result['content'] = $content;
+        }
+
+        return $result;
+    }
+
+    /**
+     * @param array<int, true> $visited
+     *
+     * @return array<string, mixed>
+     */
+    private function schemaToArray(Schema $schema, int $depth = 0, array &$visited = []): array
+    {
+        $objectId = spl_object_id($schema);
+        if (isset($visited[$objectId]) || $depth > 3) {
+            return $schema->type ? ['type' => $schema->type] : [];
+        }
+        $visited[$objectId] = true;
+
+        $result = [];
+
+        if ($schema->type) {
+            $result['type'] = $schema->type;
+        }
+        if ($schema->format) {
+            $result['format'] = $schema->format;
+        }
+        if ($schema->description) {
+            $result['description'] = $schema->description;
+        }
+        if ($schema->enum) {
+            $result['enum'] = $schema->enum;
+        }
+        if (null !== $schema->default) {
+            $result['default'] = $schema->default;
+        }
+        if (null !== $schema->minimum) {
+            $result['minimum'] = $schema->minimum;
+        }
+        if (null !== $schema->maximum) {
+            $result['maximum'] = $schema->maximum;
+        }
+        if ($schema->properties) {
+            $properties = [];
+            foreach ($schema->properties as $propName => $prop) {
+                if ($prop instanceof Schema) {
+                    $properties[$propName] = $this->schemaToArray($prop, $depth + 1, $visited);
+                }
+            }
+            $result['properties'] = $properties;
+        }
+        if (isset($schema->items) && $schema->items instanceof Schema) {
+            $result['items'] = $this->schemaToArray($schema->items, $depth + 1, $visited);
+        }
+        if ($schema->required) {
+            $result['required'] = $schema->required;
+        }
+
+        unset($visited[$objectId]);
+
+        return $result;
     }
 }

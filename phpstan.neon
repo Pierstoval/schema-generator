@@ -71,7 +71,7 @@ parameters:
                  attributeGenerators: class-string<ApiPlatform\SchemaGenerator\AttributeGenerator\AttributeGeneratorInterface>[],
                  generatorTemplates: string[],
                  output: string,
-                 openApi: array{file: string}
+                 openApi: array{file: string, generateAttributes: boolean}
             }
         '''
     inferPrivatePropertyTypeFromConstructor: true

@@ -261,7 +261,18 @@ class TypesGenerator
         $typeConfig = $config['types'][$typeName] ?? null;
         $parent = $typeConfig['parent'] ?? null;
         $class = new SchemaClass($typeName, $type, $parent);
-        $class->operations = $typeConfig['operations'] ?? [];
+        $autoOperations = [];
+        if (!empty($config['openApi']['generateAttributes']) && !$config['apiPlatformOldAttributes']) {
+            $autoOperations = [
+                'Get' => null,
+                'Put' => null,
+                'Patch' => null,
+                'Delete' => null,
+                'GetCollection' => null,
+                'Post' => null,
+            ];
+        }
+        $class->operations = array_merge($autoOperations, $typeConfig['operations'] ?? []);
 
         if ($class->isEnum()) {
             (new SchemaEnumClassMutator(
